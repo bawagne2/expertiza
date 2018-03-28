@@ -36,6 +36,13 @@ class ResponseController < ApplicationController
     end
   end
 
+  # GET /response/json?response_id=xx
+  def json
+    response_id = params[:response_id] if params.key?(:response_id)
+    response = Response.find(response_id)
+    render :json => response
+  end
+
   def delete
     @response = Response.find(params[:id])
     # user cannot delete other people's responses. Needs to be authenticated.
@@ -57,7 +64,7 @@ class ResponseController < ApplicationController
     @contributor = @map.contributor
     set_all_responses
     if @prev.present?
-      @sorted = @review_scores.sort {|m1, m2| m1.version_num and m2.version_num ? m2.version_num <=> m1.version_num : (m1.version_num ? -1 : 1) }
+      @sorted = @review_scores.sort {|m1, m2| m1.version_num.to_i and m2.version_num.to_i ? m2.version_num.to_i <=> m1.version_num.to_i : (m1.version_num ? -1 : 1) }
       @largest_version_num = @sorted[0]
     end
     @modified_object = @response.response_id
@@ -67,12 +74,13 @@ class ResponseController < ApplicationController
     @questions.each do |question|
       @review_scores << Answer.where(response_id: @response.response_id, question_id: question.id).first
     end
+    @questionnaire = set_questionnaire
     render action: 'response'
   end
 
   # Update the response and answers when student "edit" existing response
   def update
-    return unless action_allowed?
+    render :nothing => true unless action_allowed?
     # the response to be updated
     @response = Response.find(params[:id])
     msg = ""
@@ -85,7 +93,8 @@ class ResponseController < ApplicationController
       if params['isSubmit'] && params['isSubmit'] == 'Yes'
         @response.update_attribute('is_submitted', true)
       else
-        @response.update_attribute('is_submitted', false)
+        # this won't work, since the auto update click edit in the background and override the submit. Don't think this is necessary anyway
+        # @response.update_attribute('is_submitted', false)
       end
       @response.notify_instructor_on_difference if (@map.is_a? ReviewResponseMap) && @response.is_submitted && @response.significant_difference?
     rescue StandardError
@@ -103,6 +112,12 @@ class ResponseController < ApplicationController
     @modified_object = @map.id
     set_content(true)
     @stage = @assignment.get_current_stage(SignedUpTeam.topic_id(@participant.parent_id, @participant.user_id)) if @assignment
+    @response = Response.create(
+        map_id: @map.id,
+        additional_comment: '',
+        round: @current_round,
+        is_submitted: 0
+    )
     render action: 'response'
   end
 
@@ -140,18 +155,18 @@ class ResponseController < ApplicationController
       @round = nil
     end
     is_submitted = (params[:isSubmit] == 'Yes')
-
-    if params[:saved].nil? || params[:saved] == "0" # a flag so the autosave doesn't create different versions. The value's changed by the javascript in response.js
+    was_submitted = false
+    @response = Response.where(map_id: @map.id, round: @round.to_i).first
+    if @response.nil?
       @response = Response.create(
           map_id: @map.id,
           additional_comment: params[:review][:comments],
-          round: @round,
+          round: @round.to_i,
           is_submitted: is_submitted
       )
-    else
-      @response = Response.find_by(map_id: @map.id, round: @round)
-      @response.update(additional_comment: params[:review][:comments])
     end
+    was_submitted = @response.is_submitted
+    @response.update(additional_comment: params[:review][:comments], is_submitted: is_submitted ) # ignore if autoupdate try to save when the response object is not yet created.
 
     # ,:version_num=>@version)
     # Change the order for displaying questions for editing response views.
@@ -159,8 +174,11 @@ class ResponseController < ApplicationController
     create_answers(params, questions) if params[:responses]
     msg = "Your response was successfully saved."
     error_msg = ""
-    @response.notify_instructor_on_difference if (@map.is_a? ReviewResponseMap) && @response.is_submitted && @response.significant_difference?
-    @response.email
+    #only notify if is_submitted changes from false to true
+    if (@map.is_a? ReviewResponseMap) && (was_submitted == false && @response.is_submitted) && @response.significant_difference?
+      @response.notify_instructor_on_difference
+      @response.email
+    end
     redirect_to controller: 'response', action: 'saving', id: @map.map_id, return: params[:return], msg: msg, error_msg: error_msg, save_options: params[:save_options]
   end
 
